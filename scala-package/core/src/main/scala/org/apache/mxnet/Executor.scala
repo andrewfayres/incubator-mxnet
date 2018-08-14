@@ -70,6 +70,17 @@ class Executor private[mxnet](private[mxnet] val handle: ExecutorHandle,
     }
   }
 
+  def disposeShared(): Unit = {
+    if (!disposed) {
+      outputs.foreach( x => if (x != null) x.dispose())
+      if (_argDict != null) _argDict.foreach{ case (k,v) => if (v != null) v.dispose()}
+      if (_gradDict != null) _gradDict.foreach{ case (k,v) => if (v != null) v.dispose()}
+      if (_auxDict != null) _auxDict.foreach{ case (k,v) => if (v != null) v.dispose()}
+      symbol.dispose()
+      disposed = true
+    }
+  }
+
   /**
    * Return a new executor with the same symbol and shared memory,
    * but different input/output shapes.
@@ -141,6 +152,7 @@ class Executor private[mxnet](private[mxnet] val handle: ExecutorHandle,
                   "If this is intended, set partialShaping = true to suppress this warning.")
       }
     }
+
     if (this._gradsReq.isInstanceOf[Seq[_]]) {
       this.symbol.bind(this._ctx,
                           newArgDict,
