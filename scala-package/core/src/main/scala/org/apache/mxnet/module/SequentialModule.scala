@@ -178,6 +178,7 @@ class SequentialModule extends BaseModule {
       }
     }
 
+    // TODO This looks like it might leak if argNames/auxNames are already initialized
     val argNames = scala.collection.mutable.Map[String, Int]()
     val auxNames = scala.collection.mutable.Map[String, Int]()
     for ((module, iLayer) <- this.modules.zipWithIndex) {

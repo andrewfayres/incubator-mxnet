@@ -19,6 +19,7 @@ package org.apache.mxnet.module
 
 import java.io.IOException
 
+import org.apache.mxnet.Base.CPtrAddress
 import org.apache.mxnet.optimizer.SGD
 import org.apache.mxnet._
 import org.slf4j.LoggerFactory
@@ -48,6 +49,8 @@ object BaseModule {
       }
     }
   }
+
+  private def doNothingDeAllocator(dummy: CPtrAddress): Int = 0
 }
 
 /**
@@ -132,7 +135,7 @@ object BaseModule {
  *  - `predict`: run prediction on a data set and collect outputs
  *  - `score`: run prediction on a data set and evaluate performance
  */
-abstract class BaseModule {
+abstract class BaseModule extends NativeResource {
   private val logger = LoggerFactory.getLogger(classOf[BaseModule])
 
   private[module] var binded: Boolean = false
@@ -144,6 +147,11 @@ abstract class BaseModule {
   private[module] var execGroup: DataParallelExecutorGroup = null
   private[module] var argParams: Map[String, NDArray] = null
   private[module] var auxParams: Map[String, NDArray] = null
+
+  override def nativeAddress: CPtrAddress = hashCode()
+  override def nativeDeAllocator: CPtrAddress => Int = BaseModule.doNothingDeAllocator
+  override val ref: NativeResourceRef = super.register()
+  override val bytesAllocated: Long = 0L
 
   // High Level API
   def getSymbol: Symbol = this.symbol
@@ -182,18 +190,18 @@ abstract class BaseModule {
 
     var nBatch = 0
     while (evalData.hasNext && nBatch < numBatch) {
-      val evalBatch = evalData.next()
+      ResourceScope.using() {
+        val evalBatch = evalData.next()
 
-      forward(evalBatch, isTrain = Option(false))
-      updateMetric(evalMetric, evalBatch.label)
+        forward(evalBatch, isTrain = Option(false))
+        updateMetric(evalMetric, evalBatch.label)
 
-      batchEndCallback.foreach(callback => {
-        callback.invoke(epoch, nBatch, evalMetric)
-      })
+        batchEndCallback.foreach(callback => {
+          callback.invoke(epoch, nBatch, evalMetric)
+        })
 
-      evalBatch.dispose()
-
-      nBatch += 1
+        nBatch += 1
+      }
     }
 
     scoreEndCallback.foreach(callback => {
@@ -224,10 +232,11 @@ abstract class BaseModule {
 
     var nBatch = 0
     while (evalData.hasNext && nBatch != numBatch) {
-      val evalBatch = evalData.next()
-      outputList.append(predict(evalBatch))
-      evalBatch.dispose()
-      nBatch += 1
+      ResourceScope.using() {
+        val evalBatch = evalData.next()
+        outputList.append(predict(evalBatch))
+        nBatch += 1
+      }
     }
 
     outputList
@@ -237,12 +246,14 @@ abstract class BaseModule {
     require(binded && paramsInitialized, "bind() and initParams() must be called first.")
     forward(batch, isTrain = Option(false))
     val pad = batch.pad
-    getOutputsMerged().map(out => {
-      val withoutPadding = out.slice(0, out.shape(0)-pad)
-      val copied = withoutPadding.copy()
-      withoutPadding.dispose()
-      copied
-    })
+    ResourceScope.using() {
+      getOutputsMerged().map(out => {
+        ResourceScope.using() {
+          val withoutPadding = out.slice(0, out.shape(0) - pad)
+          withoutPadding.copy()
+        }
+      })
+    }
   }
 
   /**
@@ -256,17 +267,17 @@ abstract class BaseModule {
    */
   def predict(evalData: DataIter, numBatch: Int = -1, reset: Boolean = true)
     : IndexedSeq[NDArray] = {
-    val outputBatches = predictEveryBatch(evalData, numBatch, reset)
-    val numOutputs = outputBatches.head.size
-    outputBatches.foreach(out =>
-      require(out.size == numOutputs,
-        s"Cannot merge batches, as num of outputs $numOutputs is not the same " +
-          s"in mini-batches (${out.size})." +
-      "Maybe bucketing is used?")
-    )
-    val concatenatedOutput = outputBatches.map(out => NDArray.concatenate(out))
-    outputBatches.foreach(_.foreach(_.dispose()))
-    concatenatedOutput
+    ResourceScope.using() {
+      val outputBatches = predictEveryBatch(evalData, numBatch, reset)
+      val numOutputs = outputBatches.head.size
+      outputBatches.foreach(out =>
+        require(out.size == numOutputs,
+          s"Cannot merge batches, as num of outputs $numOutputs is not the same " +
+            s"in mini-batches (${out.size})." +
+            "Maybe bucketing is used?")
+      )
+      outputBatches.map(out => NDArray.concatenate(out))
+    }
   }
 
   // Symbol information
@@ -373,6 +384,8 @@ abstract class BaseModule {
   @throws(classOf[IOException])
   def loadParams(fname: String): Unit = {
     val saveDict = NDArray.load(fname)
+    // TODO argParams and auxParams leak here if they were previously set. Will eventually be
+    // picked up by GC.
     val argParams = scala.collection.mutable.HashMap.empty[String, NDArray]
     val auxParams = scala.collection.mutable.HashMap.empty[String, NDArray]
     (saveDict._1 zip saveDict._2) foreach { case (key, value) =>
@@ -398,7 +411,6 @@ abstract class BaseModule {
           fitParams: FitParams = new FitParams): Unit = {
     require(fitParams != null, "Undefined fitParams")
     require(numEpoch > 0, s"Invalid number of epochs $numEpoch")
-    import org.apache.mxnet.DataDesc._
     bind(dataShapes = trainData.provideData, labelShapes = Option(trainData.provideLabel),
          forTraining = true, forceRebind = fitParams.forceRebind)
     fitParams.monitor.foreach(installMonitor)
@@ -415,21 +427,21 @@ abstract class BaseModule {
 
       var nBatch = 0
       while (trainData.hasNext) {
-        val dataBatch = trainData.next()
+        ResourceScope.using() {
+          val dataBatch = trainData.next()
 
-        fitParams.monitor.foreach(_.tic())
-        forwardBackward(dataBatch)
-        update()
-        updateMetric(fitParams.evalMetric, dataBatch.label)
-        fitParams.monitor.foreach(_.tocPrint())
+          fitParams.monitor.foreach(_.tic())
+          forwardBackward(dataBatch)
+          update()
+          updateMetric(fitParams.evalMetric, dataBatch.label)
+          fitParams.monitor.foreach(_.tocPrint())
 
-        fitParams.batchEndCallback.foreach(callback =>
-          callback.invoke(epoch, nBatch, fitParams.evalMetric)
-        )
+          fitParams.batchEndCallback.foreach(callback =>
+            callback.invoke(epoch, nBatch, fitParams.evalMetric)
+          )
 
-        dataBatch.dispose()
-
-        nBatch += 1
+          nBatch += 1
+        }
       }
 
       // one epoch of training is finished
