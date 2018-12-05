@@ -235,6 +235,7 @@ abstract class BaseModule extends NativeResource {
       ResourceScope.using() {
         val evalBatch = evalData.next()
         outputList.append(predict(evalBatch))
+        // evalBatch.dispose()
         nBatch += 1
       }
     }
