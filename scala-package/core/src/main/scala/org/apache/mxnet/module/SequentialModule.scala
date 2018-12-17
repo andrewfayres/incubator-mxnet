@@ -178,7 +178,8 @@ class SequentialModule extends BaseModule {
       }
     }
 
-    // TODO This looks like it might leak if argNames/auxNames are already initialized
+    // TODO This looks like it leaks if argNames/auxNames are already initialized. Eventually caught
+    // by the gc.
     val argNames = scala.collection.mutable.Map[String, Int]()
     val auxNames = scala.collection.mutable.Map[String, Int]()
     for ((module, iLayer) <- this.modules.zipWithIndex) {
@@ -231,40 +232,28 @@ class SequentialModule extends BaseModule {
     this.inputsNeedGrad = inputsNeedGrad
     this.binded = true
 
-    // the same label shapes are used for all chained modules
-    this.labelShapesVar = labelShapes
-
-    var myDataShapes = dataShapes
-    var myLabelShapes = labelShapes
     var anybodyEverNeedsLabel = false
     for ((module, iLayer) <- this.modules.zipWithIndex) {
       val meta = this.metas(iLayer)
-      if (meta.contains(META_TAKE_LABELS) && meta(META_TAKE_LABELS)) {
-        myLabelShapes = labelShapes
+      val myLabelShapes = if (meta.contains(META_TAKE_LABELS) && meta(META_TAKE_LABELS)) {
         anybodyEverNeedsLabel = true
-      } else myLabelShapes = None
+        labelShapes
+      } else None
 
       val myInputsNeedGrad = if (inputsNeedGrad || (forTraining && iLayer > 0)) true else false
-      if (meta.contains(META_AUTO_WIRING) && meta(META_AUTO_WIRING)) {
+      val myDataShapes = if (meta.contains(META_AUTO_WIRING) && meta(META_AUTO_WIRING)) {
         val dataNames = module.dataNames
-        require(dataNames.length == myDataShapes.length,
-          s"dataNmes $dataNames and dataShapes $myDataShapes do not match")
-        myDataShapes = dataNames.zip(myDataShapes).map { case (newName, dataDes) =>
-          DataDesc(newName, dataDes.shape)
-        }
-      }
+        require(dataNames.length == dataShapes.length,
+          s"dataNmes $dataNames and dataShapes $dataShapes do not match")
+        dataNames.zip(dataShapes).map { case (newName, dataDes) => DataDesc(newName, dataDes.shape)}
+      } else dataShapes
 
       module.bind(myDataShapes, myLabelShapes, forTraining, myInputsNeedGrad,
           forceRebind, sharedModule = None, gradReq)
-      // the output of the previous module is the data of the next module
-      myDataShapes = module.outputShapes.map{case (name, shape) => DataDesc(name, shape)}
     }
 
+    this.labelShapesVar = if (anybodyEverNeedsLabel) labelShapes else None
 
-    if (!anybodyEverNeedsLabel) {
-      // then I do not need label either
-      this.labelShapesVar = None
-    }
   }
 
   /**
@@ -285,8 +274,8 @@ class SequentialModule extends BaseModule {
       for (module <- this.modules) {
         module.initOptimizer(kvstore, optimizer, resetOptimizer, forceInit)
       }
+      this.optimizerInitialized = true
     }
-    this.optimizerInitialized = true
   }
 
   /**

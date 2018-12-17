@@ -233,10 +233,9 @@ abstract class BaseModule extends NativeResource {
     var nBatch = 0
     while (evalData.hasNext && nBatch != numBatch) {
       ResourceScope.using() {
-        val evalBatch = evalData.next()
-        outputList.append(predict(evalBatch))
-        // evalBatch.dispose()
         nBatch += 1
+        outputList.append(predict(evalData.next()))
+        outputList
       }
     }
 

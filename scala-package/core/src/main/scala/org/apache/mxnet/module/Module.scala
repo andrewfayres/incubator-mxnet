@@ -157,7 +157,7 @@ class Module(symbolVar: Symbol,
   private def impl(name: String, arr: NDArray, allowMissing: Boolean,
                    initializer: Option[Initializer] = None,
                    cache: Map[String, NDArray] = null): Unit = {
-    if (cache != null) {
+    if (cache ne null) {
       if (cache.contains(name)) {
         val cacheArr = cache(name) // just in case the cached array is just the target itself
         if (cacheArr ne arr) {
@@ -194,6 +194,7 @@ class Module(symbolVar: Symbol,
                 forceInit: Boolean = true,
                 allowExtra: Boolean = false): Unit = {
     if (!allowMissing) {
+      // initParams calls the execGroup.setParams so no need to do it here
       this.initParams(null, argParams, auxParams, allowMissing, forceInit, allowExtra)
     } else if (this.paramsInitialized && !forceInit) {
       logger.warn("Parameters already initialized and forceInit=false. " +
@@ -246,63 +247,59 @@ class Module(symbolVar: Symbol,
 
     if (binded) {
       logger.warn("Already binded, ignoring bind()")
-      return
-    }
-
-    this.forTraining = forTraining
-    this.inputsNeedGrad = inputsNeedGrad
-    this.binded = true
-
-    if (!forTraining) {
-      require(!inputsNeedGrad, "Invalid inputsNeedGrad (cannot be true if not forTraining)")
     } else {
-      // this is not True, as some module might not contains a loss function
-      // that consumes the labels
-      // require(labelShapes != None)
-    }
 
-    this.dataShapesVar = dataShapes
-    this.labelShapesVar = labelShapes
+      this.forTraining = forTraining
+      this.inputsNeedGrad = inputsNeedGrad
+      this.binded = true
 
-    val sharedGroup =
-      sharedModule.map(sharedModuleInst => {
-        require(sharedModuleInst.binded && sharedModuleInst.paramsInitialized,
-          s"bind() and initParams() must be called first on shared module.")
-        sharedModuleInst.execGroup
-      })
+      if (!forTraining) {
+        require(!inputsNeedGrad, "Invalid inputsNeedGrad (cannot be true if not forTraining)")
+      }
 
-    val inputTypes = this.dataShapesVar.map(dataDesc => (dataDesc.name, dataDesc.dtype)).toMap ++
-      labelShapes.map(shapes => shapes.map(dataDesc => (dataDesc.name, dataDesc.dtype)).toMap)
-                 .getOrElse(Map.empty[String, DType])
+      this.dataShapesVar = dataShapes
+      this.labelShapesVar = labelShapes
 
-    execGroup = new Builder(symbol, contexts, paramNames)
-      .setWorkLoadList(workLoads)
-      .setDataShapes(dataShapes)
-      .setLabelShapes(labelShapes.orNull)
-      .setForTraining(forTraining)
-      .setInputsNeedGrad(inputsNeedGrad)
-      .setSharedGroup(sharedGroup.orNull)
-      .setFixedParamNames(fixedParamNames.orNull)
-      .setGradReq(gradReq)
-      .setInputTypes(inputTypes)
-      .build()
+      val sharedGroup =
+        sharedModule.map(sharedModuleInst => {
+          require(sharedModuleInst.binded && sharedModuleInst.paramsInitialized,
+            s"bind() and initParams() must be called first on shared module.")
+          sharedModuleInst.execGroup
+        })
 
-    if (sharedModule.isDefined) {
-      paramsInitialized = true
-      argParams = sharedModule.get.argParams
-      auxParams = sharedModule.get.auxParams
-    } else if (paramsInitialized) {
-      // if the parameters are already initialized, we are re-binding
-      // so automatically copy the already initialized params
-      execGroup.setParams(argParams, auxParams)
-    }
+      val inputTypes = this.dataShapesVar.map(dataDesc => (dataDesc.name, dataDesc.dtype)).toMap ++
+        labelShapes.map(shapes => shapes.map(dataDesc => (dataDesc.name, dataDesc.dtype)).toMap)
+          .getOrElse(Map.empty[String, DType])
 
-    sharedModule.foreach {
-      case sharedModuleInst: Module =>
-        if (sharedModuleInst.optimizerInitialized) {
-          borrowOptimizer(sharedModuleInst)
-        }
-      case _ =>
+      execGroup = new Builder(symbol, contexts, paramNames)
+        .setWorkLoadList(workLoads)
+        .setDataShapes(dataShapes)
+        .setLabelShapes(labelShapes.orNull)
+        .setForTraining(forTraining)
+        .setInputsNeedGrad(inputsNeedGrad)
+        .setSharedGroup(sharedGroup.orNull)
+        .setFixedParamNames(fixedParamNames.orNull)
+        .setGradReq(gradReq)
+        .setInputTypes(inputTypes)
+        .build()
+
+      if (sharedModule.isDefined) {
+        paramsInitialized = true
+        argParams = sharedModule.get.argParams
+        auxParams = sharedModule.get.auxParams
+      } else if (paramsInitialized) {
+        // if the parameters are already initialized, we are re-binding
+        // so automatically copy the already initialized params
+        execGroup.setParams(argParams, auxParams)
+      }
+
+      sharedModule.foreach {
+        case sharedModuleInst: Module =>
+          if (sharedModuleInst.optimizerInitialized) {
+            borrowOptimizer(sharedModuleInst)
+          }
+        case _ =>
+      }
     }
   }
 
@@ -426,15 +423,12 @@ class Module(symbolVar: Symbol,
   }
 
   /**
-   * Forward computation.
-   * @param dataBatch input data
-   * @param isTrain Default is `None`, which means `is_train` takes the value of `for_training`.
-   */
-  def forward(dataBatch: DataBatch, isTrain: Option[Boolean] = None): Unit = {
-    require(binded && paramsInitialized, "bind() and initParams() must be called first.")
-    val currDataShapes = this.dataShapes.map(_.shape)
+    * Private method to do a reshape if one is needed.
+    */
+
+  private def _reshapeIfNeeded(dataBatch: DataBatch): Unit = {
     val newDataShapes = dataBatch.data.map(_.shape)
-    if (currDataShapes != newDataShapes) {
+    if (this.dataShapes.map(_.shape) != newDataShapes) {
       val newDShapes: IndexedSeq[DataDesc] =
         if (dataBatch.provideData != null) dataBatch.provideData
         else {
@@ -445,13 +439,23 @@ class Module(symbolVar: Symbol,
       val newLShapes: Option[IndexedSeq[DataDesc]] =
         if (dataBatch.provideLabel != null) Some(dataBatch.provideLabel)
         else if (dataBatch.label != null && dataBatch.label.length > 0
-            && this.labelShapes != null) {
+          && this.labelShapes != null) {
           Some(this.labelShapes.zip(dataBatch.label).map { case (i, j) =>
             DataDesc(i.name, j.shape, i.dtype, i.layout)
           })
         } else None
       this.reshape(newDShapes, newLShapes)
     }
+  }
+
+  /**
+   * Forward computation.
+   * @param dataBatch input data
+   * @param isTrain Default is `None`, which means `is_train` takes the value of `for_training`.
+   */
+  def forward(dataBatch: DataBatch, isTrain: Option[Boolean] = None): Unit = {
+    require(binded && paramsInitialized, "bind() and initParams() must be called first.")
+    this._reshapeIfNeeded(dataBatch)
     execGroup.forward(dataBatch, isTrain)
   }
 

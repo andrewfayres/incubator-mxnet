@@ -107,7 +107,7 @@ object ResourceScope {
 
     val curScope = if (scope != null) scope else new ResourceScope()
 
-    @inline def resourceInGeneric(g: scala.collection.Iterable[_]) = {
+    @inline def resourceInGeneric(g: scala.collection.Iterable[_]): Unit = {
       g.foreach( n =>
         n match {
           case nRes: NativeResource => {
@@ -118,6 +118,9 @@ object ResourceScope {
               kv._1.asInstanceOf[NativeResource])
             if (kv._2.isInstanceOf[NativeResource]) curScope.moveToOuterScope(
               kv._2.asInstanceOf[NativeResource])
+          }
+          case col: scala.collection.Iterable[_] => {
+            resourceInGeneric(col)
           }
         }
       )

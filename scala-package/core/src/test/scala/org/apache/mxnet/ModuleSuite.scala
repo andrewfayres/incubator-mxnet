@@ -23,6 +23,10 @@ import org.apache.mxnet.optimizer._
 import org.apache.mxnet.io._
 
 class ModuleSuite extends FunSuite with BeforeAndAfterAll {
+
+  /**
+    * Asserts that module.getOutputs of of type specified during bind.
+    */
   test ("model dtype") {
     val dType = DType.Float32
     val dShape = Shape(3, 8, 7)
@@ -43,6 +47,9 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(mod.getOutputs.flatten.forall(_.dtype == dType))
   }
 
+  /**
+    * Binds simple example and verifies inputGrads are correct.
+    */
   test ("module input_grads") {
     val a = Symbol.Variable("a", kwargs = Map("__layout__" -> "NC"))
     val b = Symbol.Variable("b", kwargs = Map("__layout__" -> "NC"))
@@ -79,6 +86,11 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(cGrad.forall(_ == 3f))
   }
 
+  /**
+    * Binds module with TNC layout. Does forward/backward pass. Asserts that the merged
+    * output matches initial shape. Then asserts that non-merged output of each context
+    * matches original shape with batch / 2.
+    */
   test ("module layout") {
     var sym = Symbol.Variable("data")
     sym = Symbol.Activation(attr = Map("__layout__" -> "TNC"))()(
@@ -99,6 +111,10 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     for (x <- mod.getOutputs) assert(x(0).shape == hdShape)
   }
 
+  /**
+    * Creates module, saves checkpoint. Loads checkpoint into new module then asserts that the
+    * symbols and params of original and new modules are the equal. Repeats for multiple contexts.
+    */
   test ("save load") {
     def mapEqu(a: Map[String, NDArray], b: Map[String, NDArray]): Unit = {
       assert(a.toSet == b.toSet)
@@ -137,6 +153,12 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(mod.getSymbol.toJson == mod2.getSymbol.toJson)
     mapEqu(mod.getParams._1, mod2.getParams._1)
   }
+
+  /**
+    * Creates module, does forward/backward pass then asserts that shape and params are correct.
+    * Then reshapes module, does forward/backward, and repeats asserts.
+    * Reshapes back to the original shape, does forward/backward, and repeats asserts.
+    */
 
   test ("module reshape") {
     var sym = Symbol.Variable("data")
@@ -180,6 +202,10 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(mod.getParams._1("fc_bias").toArray.forall(x => (x - -3f) < 1e-3))
   }
 
+  /**
+    * Creates module, creates parameters, sets parameters. Doesn't actually assert that params
+    * were set correctly. Looks like it skips some combinations of flags.
+    */
   test ("module setParams") {
     val data = NDArray.array(Array(0.05f, 0.1f), Shape(1, 1, 1, 2))
     val label = NDArray.array(Array(0.01f, 0.99f), Shape(1, 1, 1, 2))
@@ -229,6 +255,10 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
       allowMissing = true, allowExtra = true)
   }
 
+  /**
+    * Creates a module and binds a monitor to it. Does starts monitor, does forwardBackward pass,
+    * stops monitor. Compares results from monitor with the known expected.
+    */
   test ("monitor") {
     // data iter
     val data = NDArray.array(Array(0.05f, 0.1f), Shape(1, 1, 1, 2))
@@ -283,6 +313,11 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(monResultCounts.zip(Array(2, 2, 1, 6, 6, 4)).forall(x => x._1 == x._2))
   }
 
+  /**
+    * Sets up a module, trains with random data. Changes batch size. Trains. Changes batch size.
+    * Trains. Changes batch size, height, and width. Trains again. During the training steps,
+    * asserts that the number of outputs is correct.
+    */
   test ("forward reshape") {
     val numClass = 10
     val data1 = Symbol.Variable("data1")
@@ -382,5 +417,74 @@ class ModuleSuite extends FunSuite with BeforeAndAfterAll {
     assert(mod.getOutputsMerged()(0).shape == Shape(lShape(0), numClass))
     mod.backward()
     mod.update()
+  }
+
+  test ("module verifyGets") {
+    val (mod, dd1, dd2, ls, sym) = simpleBind
+    mod.initParams()
+    mod.initOptimizer(optimizer = new SGD(learningRate = 0.01f))
+
+    assert(mod.dataShapes(0) eq dd1)
+    assert(mod.dataShapes(1) eq dd2)
+    assert(mod.labelShapes(0) eq ls)
+    assert(mod.outputNames(0) == sym.listOutputs()(0))
+
+    var dataBatch = new DataBatch(
+      data = IndexedSeq(
+        NDArray.random_uniform(Map("low" -> 0, "high" -> 9, "shape" -> dd1.shape.toString()))(),
+        NDArray.random_uniform(Map("low" -> 5, "high" -> 15, "shape" -> dd2.shape.toString()))()),
+      label = IndexedSeq(NDArray.ones(ls.shape)), index = null, pad = 0)
+    mod.forward(dataBatch)
+    assert(mod.outputShapes(0)._1 == sym.listOutputs()(0))
+    assert(mod.outputShapes(0)._2 == Shape(10, 10))
+
+    val (arg, aux) = mod.getParams
+
+    println(ls.name)
+    val filterList = (mod.dataNames ++ sym.listOutputs()(0)) + ls.name
+    println(filterList)
+    println("here")
+    sym.listArguments().filterNot(filterList.toSet).foreach(entry => println(entry))
+
+    println("now arg")
+    arg.foreach(entry => println(entry._1))
+    arg.foreach(entry => println(entry._2))
+
+    println("now aux")
+    aux.foreach(entry => println(entry._1))
+    aux.foreach(entry => println(entry._2))
+  }
+
+  def simpleBind = {
+    val numClass = 10
+    val data1 = Symbol.Variable("data1")
+    val data2 = Symbol.Variable("data2")
+    val conv1 = Symbol.Convolution()()(Map("data" -> data1,
+    "kernel" -> "(2, 2)", "num_filter" -> 2, "stride" -> "(2, 2)"))
+    val conv2 = Symbol.Convolution()()(Map("data" -> data2,
+    "kernel" -> "(3, 3)", "num_filter" -> 3, "stride" -> "(1, 1)"))
+    val pooling1 = Symbol.Pooling()()(Map("data" -> conv1,
+    "kernel" -> "(2, 2)", "pool_type" -> "avg", "stride" -> "(1, 1)"))
+    val pooling2 = Symbol.Pooling()()(Map("data" -> conv2,
+    "kernel" -> "(2, 2)", "pool_type" -> "max", "stride" -> "(1, 1)"))
+    val flatten1 = Symbol.flatten()()(Map("data" -> pooling1))
+    val flatten2 = Symbol.flatten()()(Map("data" -> pooling2))
+    val sum = Symbol.sum()()(Map("data" -> flatten1, "axis" -> 1)) +
+    Symbol.sum()()(Map("data" -> flatten2, "axis" -> 1))
+    val fc = Symbol.FullyConnected()()(
+    Map("data" -> sum, "num_hidden" -> numClass))
+    val sym = Symbol.SoftmaxOutput(name = "softmax")()(Map("data" -> fc))
+
+    var dShape1 = Shape(10, 3, 64, 64)
+    var dShape2 = Shape(10, 3, 32, 32)
+    var lShape = Shape(10)
+
+    var dd1 = DataDesc("data1", dShape1)
+    var dd2 = DataDesc("data2", dShape2, layout = "NCHW")
+    var ls = DataDesc("softmax_label", lShape, layout = "N")
+
+    val mod = new Module(sym, IndexedSeq("data1", "data2"))
+    mod.bind(dataShapes = IndexedSeq(dd1, dd2), labelShapes = Option(IndexedSeq(ls)))
+    (mod, dd1, dd2, ls, sym)
   }
 }
