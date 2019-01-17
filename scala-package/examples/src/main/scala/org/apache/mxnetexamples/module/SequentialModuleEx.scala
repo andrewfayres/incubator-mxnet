@@ -68,21 +68,23 @@ object SequentialModuleEx {
     val metric = new Accuracy()
 
     for (epoch <- 0 until cmdLine.numEpoch) {
-      while (train.hasNext) {
-        val batch = train.next()
-        modSeq.forward(batch)
-        modSeq.updateMetric(metric, batch.label)
-        modSeq.backward()
-        modSeq.update()
+      ResourceScope.using() {
+        while (train.hasNext) {
+          val batch = train.next()
+          modSeq.forward(batch)
+          modSeq.updateMetric(metric, batch.label)
+          modSeq.backward()
+          modSeq.update()
+        }
+
+        val fname = "%s-%04d.params".format(s"${cmdLine.saveModelPath}/seqModule", epoch)
+        modSeq.saveParams(fname)
+
+        val (name, value) = metric.get
+        logger.info(s"epoch $epoch $name=$value")
+        metric.reset()
+        train.reset()
       }
-
-      val fname = "%s-%04d.params".format(s"${cmdLine.saveModelPath}/seqModule", epoch)
-      modSeq.saveParams(fname)
-
-      val (name, value) = metric.get
-      logger.info(s"epoch $epoch $name=$value")
-      metric.reset()
-      train.reset()
     }
   }
 

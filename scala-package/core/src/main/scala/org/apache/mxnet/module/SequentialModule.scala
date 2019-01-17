@@ -232,28 +232,40 @@ class SequentialModule extends BaseModule {
     this.inputsNeedGrad = inputsNeedGrad
     this.binded = true
 
+    // the same label shapes are used for all chained modules
+    this.labelShapesVar = labelShapes
+
+    var myDataShapes = dataShapes
+    var myLabelShapes = labelShapes
     var anybodyEverNeedsLabel = false
     for ((module, iLayer) <- this.modules.zipWithIndex) {
       val meta = this.metas(iLayer)
-      val myLabelShapes = if (meta.contains(META_TAKE_LABELS) && meta(META_TAKE_LABELS)) {
+      if (meta.contains(META_TAKE_LABELS) && meta(META_TAKE_LABELS)) {
+        myLabelShapes = labelShapes
         anybodyEverNeedsLabel = true
-        labelShapes
-      } else None
+      } else myLabelShapes = None
 
       val myInputsNeedGrad = if (inputsNeedGrad || (forTraining && iLayer > 0)) true else false
-      val myDataShapes = if (meta.contains(META_AUTO_WIRING) && meta(META_AUTO_WIRING)) {
+      if (meta.contains(META_AUTO_WIRING) && meta(META_AUTO_WIRING)) {
         val dataNames = module.dataNames
-        require(dataNames.length == dataShapes.length,
-          s"dataNmes $dataNames and dataShapes $dataShapes do not match")
-        dataNames.zip(dataShapes).map { case (newName, dataDes) => DataDesc(newName, dataDes.shape)}
-      } else dataShapes
+        require(dataNames.length == myDataShapes.length,
+          s"dataNmes $dataNames and dataShapes $myDataShapes do not match")
+        myDataShapes = dataNames.zip(myDataShapes).map { case (newName, dataDes) =>
+          DataDesc(newName, dataDes.shape)
+        }
+      }
 
       module.bind(myDataShapes, myLabelShapes, forTraining, myInputsNeedGrad,
-          forceRebind, sharedModule = None, gradReq)
+        forceRebind, sharedModule = None, gradReq)
+      // the output of the previous module is the data of the next module
+      myDataShapes = module.outputShapes.map{case (name, shape) => DataDesc(name, shape)}
     }
 
-    this.labelShapesVar = if (anybodyEverNeedsLabel) labelShapes else None
 
+    if (!anybodyEverNeedsLabel) {
+      // then I do not need label either
+      this.labelShapesVar = None
+    }
   }
 
   /**
